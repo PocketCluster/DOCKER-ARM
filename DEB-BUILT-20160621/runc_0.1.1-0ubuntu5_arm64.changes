@@ -1,0 +1,33 @@
+Format: 1.8
+Date: Wed, 15 Jun 2016 14:47:50 -0700
+Source: runc
+Binary: runc golang-github-opencontainers-runc-dev
+Architecture: source all arm64
+Version: 0.1.1-0ubuntu5
+Distribution: yakkety
+Urgency: medium
+Maintainer: Ubuntu Developers <ubuntu-devel-discuss@lists.ubuntu.com>
+Changed-By: Tianon Gravi <tianon@debian.org>
+Description:
+ golang-github-opencontainers-runc-dev - Open Container Project - develpoment files
+ runc       - Open Container Project - runtime
+Changes:
+ runc (0.1.1-0ubuntu5) yakkety; urgency=medium
+ .
+   * Fix "-dev" package Depends, and use vendoring more directly
+Checksums-Sha1:
+ 19cf05470de4ffe8c76b5fb32c1413451d61c7b7 1344 runc_0.1.1-0ubuntu5.dsc
+ 872139f45a6d615704ea961eb43af1383cac6455 11440 runc_0.1.1-0ubuntu5.debian.tar.xz
+ 6960f88cb15656e03c6edd4009554fac221b3cdc 371324 golang-github-opencontainers-runc-dev_0.1.1-0ubuntu5_all.deb
+ fa305facd21df7a7f70f26c548eabf4ca2dd39e8 1218266 runc_0.1.1-0ubuntu5_arm64.deb
+Checksums-Sha256:
+ 176670be7ffc35c97e6e0530486a9da04be6387d74d6d7191410f30f3e11db4a 1344 runc_0.1.1-0ubuntu5.dsc
+ a3a420c8d9fed54c4b6415797100f0344c81ee0fddb26afbb4321dfb617c389e 11440 runc_0.1.1-0ubuntu5.debian.tar.xz
+ e86d1632b56e747e8edc809d3c1e2507d638a570c27b47934ceaa4cd7e83a603 371324 golang-github-opencontainers-runc-dev_0.1.1-0ubuntu5_all.deb
+ 489b34282885c5b89cec7512a87f9b09946e2b9f4ac6dfefb7f01d28db13a076 1218266 runc_0.1.1-0ubuntu5_arm64.deb
+Files:
+ 9dad44955560d187a3c085cf8c8036e4 1344 devel extra runc_0.1.1-0ubuntu5.dsc
+ 457abef9d044b685e1a0d9d6bd668f83 11440 devel extra runc_0.1.1-0ubuntu5.debian.tar.xz
+ 012d485f223399f0c065e3fa9c2927a9 371324 devel extra golang-github-opencontainers-runc-dev_0.1.1-0ubuntu5_all.deb
+ 3035a455e9a259f747326b2b6aeeb098 1218266 devel extra runc_0.1.1-0ubuntu5_arm64.deb
+Original-Maintainer: Debian Go Packaging Team <pkg-go-maintainers@lists.alioth.debian.org>

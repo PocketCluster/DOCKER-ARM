@@ -30,7 +30,50 @@ In order to mimic the best possible docker building, few things first.
 - Debian runC repo : <https://anonscm.debian.org/cgit/pkg-go/packages/runc.git>
 - Debian containerD repo : <https://anonscm.debian.org/cgit/pkg-go/packages/containerd.git>
 
-### How to build
+### How to Build `docker.io.deb v1.10.3` package With GccGo6 (01/30/2017)
+
+You must read [`PACKAGER.md`](DOCUMENT/PACKAGERS.md) and then have prepped all the requirements, it's time to build it.
+
+1. Download [docker.io_1.10.3.orig.tar.gz](https://launchpad.net/ubuntu/+archive/primary/+files/docker.io_1.10.3.orig.tar.gz) and unarchive it.
+2. Download the debian packager package [docker.io_1.10.3-0ubuntu6.debian.tar.xz](https://launchpad.net/ubuntu/+archive/primary/+files/docker.io_1.10.3-0ubuntu6.debian.tar.xz), and unachive it into `docker-1.10.3/debian`
+
+  ```sh
+  tar -xvf docker.io_1.10.3-0ubuntu6.debian.tar.xz -C ./docker-1.10.3/debian
+  ```
+  * Make sure the original archive is placed at the parent directory and don't delete original archives!
+  * Debian package builder will overwrite  `docker.io_1.10.3-0ubuntu6.debian.tar.xz`! Watchout for backup
+3. Make sure you installed all the required packages. **DO NOT USE `golang-go`** as we've substitude with `gccgo6`.
+  
+  ```sh  
+  # Hold off installing golang-go if you have your own golang binary, or gccgo
+  apt-mark hold golang-go
+
+  apt install autotools-dev bash-completion bsdmainutils btrfs-tools debhelper dh-strip-nondeterminism dh-systemd gccgo gccgo-6 libgo9 gettext gettext-base git groff-base intltool-debian javascript-common libapparmor-dev libarchive-zip-perl libasprintf-dev libasprintf0v5 libcroco3 libdevmapper-dev libdevmapper-event1.02.1 libfile-stripnondeterminism-perl libgettextpo-dev libgettextpo0 libjs-excanvas liblzo2-2 libmail-sendmail-perl libpcre16-3 libpcre3-dev libpcre32-3 libpcrecpp0v5 libpipeline1 libselinux1-dev libsepol1-dev libsqlite0 libsys-hostname-long-perl libtimedate-perl libudev-dev libunistring0 man-db mercurial mercurial-common po-debconf sqlite sqlite3 go-md2man dh-golang
+  ```  
+4. Set build environemnt as described in [PACKAGERS](DOCUMENT/PACKAGERS.md)
+
+  ```sh
+  export TMPDIR=/mnt/TEMP # set tmp to HDD so SD card would not wear out
+  export AUTO_GOPATH=1    # set corrent directory as the source directory
+  export DOCKER_BUILDTAGS='apparmor' # specify apparmor
+  ```
+5. Build & generate source and binary packages at the docker directory.
+
+  ```sh
+  cd docker-1.10.3  
+  dpkg-buildpackage -F 
+  ```
+6. The resultant `.deb` files at the parent directory.
+
+> References
+
+- <https://github.com/docker/docker/issues/23018>
+- <http://stackoverflow.com/questions/25811445/what-are-the-primary-differences-between-gc-and-gccgo>
+- <https://golang.org/doc/go1.7#gccgo>
+  
+  > Gccgo : Due to the alignment of Go's semiannual release schedule with GCC's annual release schedule, GCC release 6 contains the Go 1.6.1 version of gccgo. The next release, GCC 7, will likely have the Go 1.8 version of gccgo.
+
+### How to build (06/21/2016)
 
 Once you've prepped all the requirements from `PACKAGER.md`, it's time to build it.
 

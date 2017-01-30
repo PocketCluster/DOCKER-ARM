@@ -1,0 +1,1241 @@
+diff --git a/Makefile b/Makefile
+index 168707a..2955e5e 100644
+--- a/Makefile
++++ b/Makefile
+@@ -39,3 +39,9 @@ docs-build:
+ 
+ bundles:
+ 	mkdir bundles
++
++bootstrap:	bundles
++	hack/make.sh bootstrap
++
++debs: build
++	$(DOCKER_RUN_DOCKER) hack/make.sh binary ubuntu
+diff --git a/archive/stat_darwin.go b/archive/stat_darwin.go
+index 3220329..bcd281f 100644
+--- a/archive/stat_darwin.go
++++ b/archive/stat_darwin.go
+@@ -1,4 +1,4 @@
+-// +build !linux !amd64
++// +build !linux
+ 
+ package archive
+ 
+diff --git a/contrib/bootstrap-docker.sh b/contrib/bootstrap-docker.sh
+new file mode 100644
+index 0000000..bfd80d6
+--- /dev/null
++++ b/contrib/bootstrap-docker.sh
+@@ -0,0 +1,601 @@
++#!/bin/bash -
++# bootstrap-docker.sh - docker emulator intended for bootstrapping docker
++# Usually, this is run by "hack/make.sh bootstrap".
++#
++# How this is used:
++#   Create a new directory, add a symlink in it named "docker" and pointing
++#   to this script. Make the script executable and add the directory to
++#   PATH, making sure that running "docker version" will run this script.
++#
++#   Create a second directory, and set the environment variable
++#   BOOTSTRAP_DOCKER_DIR to its full pathname. The script will create
++#   baseimage.tar.xz and docker:HEAD/ under this directory.
++#
++#   (Optional) Set the environment variable
++#   BOOTSTRAP_DOCKER_MKIMAGE_DEBOOTSTRAP_SH to the path to the
++#   contrib/mkimage-debootstrap.sh script in the Docker source tree.
++#   If this script is run in the root of the source tree, this script
++#   will figure it out.
++#
++#   When "make bootstrap" is run, create the above directories and environment
++#   variables, then run "make binary" in the enhanced environment. It should
++#   then build the base image in an lxc container and kick off the build inside
++#   that container. The resulting binary will appear in bundles/$(cat
++#   VERSION)/binary as in a normal build.
++#
++# TODO:
++#   Provide a --dry-run mode which squawks if docker/Dockerfile usage
++#   exceeds what this script can handle. Include JSON formatting that's
++#   beyond the simple mind of the JSON parser herein.
++#   Before getting into the meat of docker_build, run a quick check to
++#   see if the host system is missing anything that would cause the
++#   build to fail late in the build.
++#
++# The command "docker" should resolve to this script during a bootstrap
++# build. This script supports a very limited subset of docker commands:
++#
++#   docker version
++#
++#   docker build -rm -t IMAGENAME .
++#     This creates a directory ${BOOTSTRAP_DOCKER_DIR}/IMAGENAME and
++#     populates it by processing Dockerfile. See below for the supported
++#     Dockerfile semantics. Any previous directory is deleted; there is
++#     no caching of previous images.
++#
++#   docker run -rm -i -t -privileged -e TESTFLAGS -v HOSTDIR:MOUNTPOINT
++#       IMAGENAME cmd args...
++#     This runs cmd args... inside the container created by docker build.
++#     HOSTDIR is bind-mounted as MOUNTPOINT inside the container. A
++#     pseudo-tty is allocated and attached. Unlike real docker, the
++#     container is NOT reset to the image -- the container uses the image
++#     directly, so any changes will affect future runs. For this reason,
++#     don't call "docker run" twice on the same image without using
++#     "docker build -rm" to rebuild it.
++#
++# The Dockerfile commands are processed as follows:
++#
++#   docker-version
++#     Ignored.
++#
++#   FROM
++#     The image name is ignored; contrib/mkimage-debootstrap.sh -t is used
++#     to initialize the container filesystem.
++#
++#   MAINTAINER
++#     Ignored.
++#
++#   RUN
++#     The rest of the line is passed to /bin/sh -c inside the container.
++#     The JSON-array syntax is not supported.
++#
++#   ENV
++#     The key and value are saved in a file. When the image is run, the
++#     contents of that file will be used in shell assignments to exported
++#     variables so that they will be set in the environment of the entrypoint.
++#
++#   VOLUME
++#     The directory is created, nothing more. The JSON-array syntax is
++#     not supported.
++#
++#   WORKDIR
++#     The directory name is saved in a file. When the image is run,
++#     the contents of that file will be used as arguments to cd.
++#     There will be lots of shell quoting.
++#
++#   ENTRYPOINT
++#     The command and optional arguments are saved in a file. When the
++#     image is run, the contents of the file will be the command and
++#     arguments (along with any extra arguments on the command line).
++#
++#   ADD
++#     The source dir is tarred and untarred into position.
++
++set -o errexit
++set -o pipefail
++set -o nounset
++
++# PROG is the name of this script as invoked (i.e. "docker").
++PROG="$0"
++PROG="${PROG##*/}"
++
++newline='
++'
++
++usage() {
++  printf 1>&2 'In this build, %s is really bootstrap-docker.sh\n' "${PROG}"
++  printf 1>&2 'Implemented usages:\n'
++  printf 1>&2 '    %s version\n' "${PROG}"
++  printf 1>&2 '    %s build -rm -t IMAGENAME .\n' "${PROG}"
++  printf 1>&2 '    %s run -rm -i -t -privileged -e TESTFLAGS %s\n' "${PROG}" \
++    '-v HOSTDIR:MOUNTPOINT IMAGENAME COMMAND ARGS...'
++}
++
++# shellquote foo => 'foo'
++# shellquote foo'bar => 'foo'\''bar'
++shellquote() {
++  local input="$1"
++  local output=""
++  local backslash='\'
++  local apostrophe="'"
++  if [[ -z "${input}" ]]; then
++    # Empty string => pair of apostrophes
++    printf "''"''
++    return 0
++  fi
++  while [[ -n "${input}" ]]; do
++    case "${input}" in
++    "'"*)
++      # Escape the apostrophe.
++      output="${output}${backslash}${apostrophe}"
++      input="${input#${apostrophe}}"
++      ;;
++    *"'"*)
++      # Quote everything before the first apostrophe, and then escape
++      # the apostrophe.
++      output="${output}${apostrophe}${input%%${apostrophe}*}${apostrophe}${backslash}${apostrophe}"
++      input="${input#*${apostrophe}}"
++      ;;
++    *[!+,./0-9:=@A-Z_a-z-]*)
++      # There are no apostrophes, but at least one character needs quoting.
++      # So quote the entire word.
++      output="${output}${apostrophe}${input}${apostrophe}"
++      input=""
++      ;;
++    *)
++      # Nothing needs quoting. Output everything literally.
++      output="${output}${input}"
++      input=""
++    esac
++  done
++  printf '%s' "${output}"
++}
++
++# echoexec CMD ARGS...
++# Writes CMD ARGS... to standard error, then runs them. Doesn't use exec.
++echoexec() {
++  local cmd="$1"
++  shift
++  printf 1>&2 '%s' "${cmd}"
++  local arg
++  for arg; do
++    printf 1>&2 ' '
++    shellquote "${arg}"
++  done
++  printf 1>&2 '\n'
++  "${cmd}" "$@"
++}
++
++# The world's worst JSON parser. It parses arrays of strings into newline-
++# terminated strings. If you use any backslashes, this will probably fail.
++# Input: ["foo", "bar baz", "quux"]
++# Output: foo\nbar baz\nquux\n
++parse_json_array() {
++  [[ $# -eq 1 ]] || {
++    printf 1>&2 'FATAL: parse_json_array expected 1 arg but got %d.\n' $#
++    exit 1
++  }
++  local json="$1"
++  local lb='['
++  local rb=']'
++  local q='"'
++  json="${json#*${lb}}"  # strip from start to [
++  json="${json%${rb}*}"  # strip from ] to end
++  json="${json#*${q}}"  # strip from start to "
++  json="${json%${q}*}"  # strip from " to end
++  json="$(printf '%s' "${json}" | sed 's/"[[:space:]]*,[[:space:]]*"/","/g')"  # canonicalize doublequote-comma-doublequote sequences.
++  while [[ -n "${json}" ]]; do
++    case "${json}" in
++    *${q},${q}*)
++      # Write section before first doublequote-comma-doublequote.
++      printf '%s\n' "${json%%${q},${q}*}"
++      # Remove the just-written section, and the separator.
++      json="${json#*${q},${q}}"
++      ;;
++    *)
++      printf '%s\n' "${json}"
++      json=''
++    esac
++  done
++}
++
++# This outputs the name of the directory which is generated by docker_build
++# and used by docker_run. The argument should be an image name.
++container_directory() {
++  [[ $# -eq 1 ]] || {
++    printf 1>&2 'FATAL: container_directory expected 1 arg but got %d.\n' $#
++    exit 1
++  }
++  local imagename="$1"
++  local parentdir="${BOOTSTRAP_DOCKER_DIR:-}"
++  [[ "${parentdir}" != '' ]] || {
++    printf 1>&2 'ERROR: BOOTSTRAP_DOCKER_DIR is not set in environment.\n'
++    # The user probably ran this manually; provide a clue.
++    printf 1>&2 'It should have been set by "make bootstrap".\n'
++    exit 1
++  }
++  printf '%s/%s' "${parentdir}" "${imagename}"
++}
++
++# This creates or reuses the compressed tar file that contains the base
++# image used to build the container. It is only built once.
++# This function assumes that the path to contrib/mkimage-debootstrap.sh
++# is in the environment variable BOOTSTRAP_DOCKER_MKIMAGE_DEBOOTSTRAP_SH,
++# but it will make educated guesses if it's missing.
++get_base_image_tar_name() {
++  local tarname="${BOOTSTRAP_DOCKER_DIR}/baseimage.tar.xz"
++  if [[ ! -f "${tarname}" ]]; then
++    local tmptarname="${tarname}.tmp"
++    [[ ! -e "${tmptarname}" ]] || rm "${tmptarname}"
++    local mkimage="${BOOTSTRAP_DOCKER_MKIMAGE_DEBOOTSTRAP_SH:-${srcdir:-.}/contrib/mkimage-debootstrap.sh}"
++    if [[ ! -r "${mkimage}" ]]; then
++      printf 'ERROR: unable to read %s; please set %s to its location.\n' \
++        "${mkimage}" "BOOTSTRAP_DOCKER_MKIMAGE_DEBOOTSTRAP_SH" 1>&2
++      return 1
++    fi
++    local arch="$(dpkg-architecture -qDEB_HOST_ARCH)"
++    bash "${mkimage}" -a "${arch}" -i iproute,iputils-ping,ubuntu-minimal \
++      -t "${tmptarname}" saucy 1>&2
++    mv "${tmptarname}" "${tarname}"
++  fi
++  printf '%s' "${tarname}"
++}
++
++# Parse a dockerfile, discarding comments, blank lines, and leading and
++# trailing whitespace on each line. The first word of each surviving line
++# is uppercased, and any whitespace immediately following that word is replaced
++# by exactly one space character. The rest of the words on the line (if any)
++# immediately follow the space. The space is present even if there are no
++# other words.
++# The parameter must be the path to a Dockerfile.
++# The standard output gets all the surviving lines, in order.
++parse_dockerfile() {
++  [[ $# -eq 1 ]] || {
++    printf 1>&2 'FATAL: parse_dockerfile expected 1 arg but got %d.\n' $#
++    exit 1
++  }
++  local input="$1"
++  local parse_dockerfile_awk='
++  BEGIN {
++    prepend = ""
++  }
++  {
++    # If the previous line ended in a backslash, put the two parts together.
++    line = prepend $0
++    prepend = ""
++
++    # Remove any comment. Comments must start at the first nonblank character
++    # of line; this restriction is necessary to avoid truncating
++    # "RUN ... ${platform##*/}".
++    if (line ~ /^[\t ]*#/) {
++      line = ""
++      next
++    }
++
++    # Remove leading and trailing whitespace.
++    while (line ~ /^[\t ]/) {
++      line = substr(line, 2)
++    }
++    while (line ~ /[\t ]$/) {
++      line = substr(line, 1, length(line) - 1)
++    }
++
++    # If it ends in a backslash, join it with the following line.
++    if (line ~ /\\$/) {
++      prepend = substr(line, 1, length(line) - 1)  # exclude the backslash
++      next
++    }
++
++    # Find the first whitespace-delimited word on the line, i.e. the command.
++    numwords = split(line, words)
++    if (numwords < 1) {
++      # Blank line
++      next
++    }
++    command = toupper(words[1])  # Uppercase for easier string comparison.
++
++    # Put the rest of the line (after removing the command) in restofline.
++    if (numwords > 1) {
++      restofline = substr(line, length(command)+1)  # begins with whitespace...
++      restofline = substr(restofline, index(restofline, words[2]))  # ...gone
++    } else {
++      restofline = ""
++    }
++
++    # Output the canonicalized line (uppercased command word).
++    printf "%s %s\n", command, restofline
++    # Notice that a space is included even if restofline is empty.
++  }
++  END {
++    if (prepend != "") {
++      print "ERROR: last line in Dockerfile ends with backslash" > "/dev/stderr"
++      exit 1
++    }
++  }
++  '
++  awk "${parse_dockerfile_awk}" "${input}"
++}
++
++# make_shell_code_for_env CONTAINERDIR
++# Read the "ENV" file from CONTAINERDIR and convert it into a string
++# which can be dropped into a /bin/sh -c script. The code will
++# effect the changes to the runtime environment specified by ENV.
++# Example, if ENV contains:
++#   PATH /usr/local/go/bin:$PATH
++#   GOPATH /go:/go/src/github.com/dotcloud/docker/vendor
++#   DOCKER_CROSSPLATFORMS darwin/amd64 darwin/386
++# then this function outputs:
++#   PATH=/usr/local/go/bin:$PATH; export PATH; GOPATH=/go:/go/src/github.com/dotcloud/docker/vendor; export GOPATH; DOCKER_CROSSPLATFORMS="darwin/amd64 darwin/386"; export DOCKER_CROSSPLATFORMS; 
++make_shell_code_for_env() {
++  [[ $# -eq 1 ]] || {
++    printf 1>&2 'FATAL: make_shell_code_for_env expected 1 arg but got %d.\n' $#
++    exit 1
++  }
++  local containerdir="$1"
++  local varname value
++  while read varname value; do
++    case "${value}" in
++    *' '*)
++      # Double-quote it so spaces are preserved.
++      value='"'"${value}"'"'
++    esac
++    printf '%s=%s; export %s; ' "${varname}" "${value}" "${varname}"
++  done < "${containerdir}/ENV"
++}
++
++# dockerfile_build SRCDIR CONTAINERDIR
++# Process the Dockerfile in SRCDIR and use it to update the image in
++# CONTAINERDIR.
++dockerfile_build() {
++  [[ $# -eq 2 ]] || {
++    printf 1>&2 'FATAL: dockerfile_build expected 2 args but got %d.\n' $#
++    exit 1
++  }
++  local srcdir="$1"
++  local container="$2"
++  local command args
++  parse_dockerfile "${srcdir}/Dockerfile" | while read command args; do
++    case "${command}" in
++      'DOCKER-VERSION')
++        # Ignored.
++        ;;
++      'FROM')
++        # The image name is ignored; contrib/mkimage-debootstrap.sh -t is used
++        # to initialize the container filesystem.
++        local baseimage="$(get_base_image_tar_name)"
++
++        # Extract the base image tarfile into a newly-created image rootfs.
++        mkdir -m 0755 "${container}"/rootfs
++        (cd "${container}"/rootfs && exec tar -xpaf "${baseimage}")
++        if [[ ! -x "${container}"/rootfs/usr/bin/env ]]; then
++          printf 1>&2 'ERROR: %s is not executable.\n' "${container}"/rootfs/usr/bin/env
++          printf 1>&2 '%s must be a bad image; delete it and try again.\n' \
++            "${baseimage}"
++          return 1
++        fi
++        ;;
++      'MAINTAINER')
++        # Ignored.
++        ;;
++      'RUN')
++        # The rest of the line is passed to /bin/sh -c inside the container.
++        # The JSON-array syntax is not supported.
++        # We have to respect ENV, so read it in.
++        local setenv="$(make_shell_code_for_env "${container}")"
++        echoexec env -i "${container}/lxc-start-unconfined" \
++          -n "$(basename ${container})-RUN" \
++          -f "${container}/lxc.conf" \
++          -c "${container}/console.log" \
++          -- /bin/sh -c "${setenv}${args}"
++        ;;
++      'ENV')
++        # The key and value are saved in a file. When the image is run, the
++        # contents of that file will be used in shell assignments to exported
++        # variables so that they will be set in the environment of the
++        # entrypoint.
++        printf '%s\n' "${args}" |
++        sed 's/[[:space:]][[:space:]]*/ /' >> "${container}"/ENV
++        ;;
++      'VOLUME')
++        # The directory is created, nothing more. The JSON-array syntax is
++        # not supported.
++        if [ ! -d "${args}" ]; then
++          mkdir "${args}"
++        fi
++        ;;
++      'WORKDIR')
++        # The directory name is saved in a file. When the image is run,
++        # the contents of that file will be used as arguments to cd.
++        # There will be lots of shell quoting.
++        printf '%s\n' "${args}" > "${container}"/WORKDIR
++        ;;
++      'ENTRYPOINT')
++        # The command and optional arguments are saved in a file. When the
++        # image is run, the contents of the file will be the command and
++        # arguments (along with any extra arguments on the command line).
++        parse_json_array "${args}" > "${container}/ENTRYPOINT"
++        ;;
++      'ADD')
++        # The source dir is tarred and untarred into position.
++        local addsrc="$(printf '%s\n' "${args}" | awk '{print $1}')"
++        local adddest="$(printf '%s\n' "${args}" | awk '{print $2}')"
++        local destfullpath="${container}/rootfs/${adddest#/}"
++        if [ ! -d "${destfullpath}" ]; then
++          mkdir -p "${destfullpath}"
++        fi
++        (cd "${srcdir}" && cd "${addsrc}" && exec tar --numeric-owner -cf - .) |
++        (cd "${destfullpath}" && exec tar -xpf - .)
++        ;;
++      *)
++        printf 1>&2 'ERROR: unknown Dockerfile command %s.\n' "${command}"
++        exit 1
++    esac </dev/null
++  done
++}
++
++# docker version
++# contrib/mkimage-debootstrap.sh expects this to exit 0.
++docker_version() {
++  [[ $# -eq 0 ]] || { usage; return 1; }
++  printf '%s (bootstrap-docker.sh) version irrelevant\n' "${PROG}"
++  return 1
++}
++
++# docker build -rm -t IMAGENAME .
++# The build Makefile uses this to construct the "docker" container image.
++docker_build() {
++  [[ $# -eq 4 ]] || { usage; return 1; }
++  [[ "$1" = "-rm" ]] || { usage; return 1; }
++  [[ "$2" = "-t" ]] || { usage; return 1; }
++  local imagename="$3"
++  local buildpath="$4"
++
++  local dir="$(container_directory "${imagename}")"
++  local realdir
++
++  # Remove the old directory if it exists.
++  if [[ -d "${dir}/." ]]; then
++    realdir="$(readlink --canonicalize "${dir}")"
++    rm -fr "${realdir}"
++  fi
++  if [[ -L "${dir}" ]]; then
++    rm -f "${dir}"
++  fi
++  if [[ -e "${dir}" || -L "${dir}" ]]; then
++    printf 1>&2 'ERROR: failed to delete old %s directory.\n' "${dir}"
++    return 1
++  fi
++
++  # Create the new one. Note that to avoid problems with device inodes on
++  # NFS filesystems (or anything else mounted nodev), the actual directory
++  # is created in $TMPDIR (which is probably a local filesystem), and
++  # ${dir} is made a symlink to it.
++  # TODO: umask
++  local realdir="$(mktemp -d -t bootstrap-docker.XXXXXXXXXX)"
++  ln -snT "${realdir}" "${dir}"
++  if [[ ! "${dir}/." -ef "${realdir}/." ]]; then
++    printf 1>&2 'ERROR: failed to create symlink %s -> %s.\n' \
++      "${dir}" "${realdir}"
++    return 1
++  fi
++
++  # Initialize the parameter files.
++  printf > "${dir}/WORKDIR" '%s\n' '/'
++  printf > "${dir}/ENV" 'HOME /\nPATH /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin\n'
++  printf > "${dir}/ENTRYPOINT" ''
++  printf > "${dir}/lxc.conf" 'lxc.pts = 1024\nlxc.console = none\nlxc.tty = 1\n'
++  printf >> "${dir}/lxc.conf" 'lxc.rootfs = %s\n' "${dir}/rootfs"
++  printf >> "${dir}/lxc.conf" 'lxc.cgroup.devices.allow = a\n'
++  printf >> "${dir}/lxc.conf" 'lxc.mount.entry = proc %s/proc proc nosuid,nodev,noexec 0 0\n' "${dir}/rootfs"
++  printf >> "${dir}/lxc.conf" 'lxc.mount.entry = sysfs %s/sys sysfs nosuid,nodev,noexec 0 0\n' "${dir}/rootfs"
++  printf >> "${dir}/lxc.conf" 'lxc.mount.entry = devpts %s/dev/pts devpts newinstance,ptmxmode=0666,nosuid,noexec 0 0\n' "${dir}/rootfs"
++  printf >> "${dir}/lxc.conf" 'lxc.mount.entry = shm %s/dev/shm tmpfs size=65536k,nosuid,nodev,noexec 0 0\n' "${dir}/rootfs"
++
++  # Create a link to lxc-start that won't inherit apparmor's dread countenance.
++  cp -fp "$(which lxc-start)" "${dir}/lxc-start-unconfined"
++
++  # Now apply the Dockerfile.
++  dockerfile_build "${buildpath}" "${dir}"
++
++  # TODO: this would be a good time to tarball the image in a cache.
++}
++
++# docker run -rm -i -t -privileged -e TESTFLAGS -v HD:MP IN CMD ARGS...
++# The build Makefile runs this command repeatedly. We expect the
++# command flags to match this template very closely. If they don't
++# match, then this script should be updated.
++docker_run() {
++  [[ $# -ge 11 ]] || { usage; return 1; }
++  [[ "$1" = "-rm" ]] || { usage; return 1; }
++  shift
++  [[ "$1" = "-i" ]] || { usage; return 1; }
++  shift
++  [[ "$1" = "-t" ]] || { usage; return 1; }
++  shift
++  [[ "$1" = "-privileged" ]] || { usage; return 1; }
++  shift
++  [[ "$1" = "-e" ]] || { usage; return 1; }
++  shift
++  [[ "$1" = "TESTFLAGS" ]] || { usage; return 1; }
++  shift
++  [[ "$1" = "-v" ]] || { usage; return 1; }
++  shift
++  local volumespec="$1"
++  shift
++  local imagename="$1"
++  shift
++  local cmd="$1"
++  shift
++  # The remaining parameters are arguments to $cmd.
++
++  local quotedcmdargs="$(shellquote "${cmd}")"
++  local arg
++  for arg; do
++    quotedcmdargs="${quotedcmdargs} $(shellquote "${arg}")"
++  done
++
++  # Find the directory prepared by docker_build.
++  local dir
++  dir="$(container_directory "${imagename}")"
++  [[ -d "${dir}/rootfs" ]] || {
++    printf 1>&2 'ERROR: %s does not exist.\n' "${dir}/rootfs"
++    printf 1>&2 '(Did you run %s build for the same imagename?)\n' "${PROG}"
++    return 1
++  }
++
++  # Read the parameters from the files where docker_run stashed them.
++  local workdir entryptline entrypoint
++  read -r workdir < "${dir}/WORKDIR"
++  local setenv="$(make_shell_code_for_env "${dir}")"
++  local saveIFS="${IFS}"
++  IFS="${newline}"
++  set dummy $(cat "${dir}/ENTRYPOINT")
++  shift
++  IFS="${saveIFS}"
++  entrypoint=''
++  for entryptline; do
++    entrypoint="${entrypoint+${entrypoint} }$(shellquote "${entryptline}")"
++  done
++
++  # The general form of the command executed inside the container is:
++  # /bin/sh -c 'cd $workdir || exit; name=value; ... exec entrypt cmd args'
++  # The workdir and the cmd/args are shellquoted, but not the environment
++  # variables/values (because the latter includes "$PATH").
++  local quotedworkdir="$(shellquote "${workdir}")"
++  local shellcmd="cd ${quotedworkdir} || exit; ${setenv}exec ${entrypoint} ${quotedcmdargs}"
++
++  # Parse $volumespec as hostdir:mountpoint, and then put it into fstab
++  # format for lxc.mount.entry.
++  local hostdir mountpoint fstab
++  hostdir="${volumespec%%:*}"
++  mountpoint="${volumespec#*:}"
++  fstab="${hostdir} ${dir}/rootfs${mountpoint} none bind 0 0"
++
++  # Start the container, run the command inside it, and wait for it to exit.
++  echoexec env -i "${dir}/lxc-start-unconfined" \
++    -n "${imagename}" \
++    -f "${dir}/lxc.conf" \
++    -c "${dir}/console.log" \
++    -s "lxc.mount.entry=${fstab}" \
++    -- /bin/sh -c "${shellcmd}"
++}
++
++main() {
++  [[ $# -ge 1 ]] || { usage; return 1; }
++  case "$1" in
++  version)
++    shift
++    docker_version "$@";;
++  build)
++    shift
++    docker_build "$@";;
++  run)
++    shift
++    docker_run "$@";;
++  *)
++    printf 1>&2 'Unsupported subcommand "%s"\n' "$1"
++    usage
++    return 1
++  esac
++}
++
++main "$@"
+diff --git a/engine/engine.go b/engine/engine.go
+index ec880b9..0f4ffe9 100644
+--- a/engine/engine.go
++++ b/engine/engine.go
+@@ -60,8 +60,8 @@ func (eng *Engine) Register(name string, handler Handler) error {
+ // behavior.
+ func New(root string) (*Engine, error) {
+ 	// Check for unsupported architectures
+-	if runtime.GOARCH != "amd64" {
+-		return nil, fmt.Errorf("The docker runtime currently only supports amd64 (not %s). This will change in the future. Aborting.", runtime.GOARCH)
++	if runtime.GOARCH != "amd64" && runtime.GOARCH != "386" {
++		return nil, fmt.Errorf("The docker runtime currently only supports amd64 and 386 (not %s). This will change in the future. Aborting.", runtime.GOARCH)
+ 	}
+ 	// Check for unsupported kernel versions
+ 	// FIXME: it would be cleaner to not test for specific versions, but rather
+diff --git a/execdriver/lxc/lxc_init_linux.go b/execdriver/lxc/lxc_init_linux.go
+index 7288f58..a671a95 100644
+--- a/execdriver/lxc/lxc_init_linux.go
++++ b/execdriver/lxc/lxc_init_linux.go
+@@ -1,4 +1,4 @@
+-// +build amd64
++// +build linux
+ 
+ package lxc
+ 
+diff --git a/execdriver/lxc/lxc_init_unsupported.go b/execdriver/lxc/lxc_init_unsupported.go
+index d68cb91..951a286 100644
+--- a/execdriver/lxc/lxc_init_unsupported.go
++++ b/execdriver/lxc/lxc_init_unsupported.go
+@@ -1,4 +1,4 @@
+-// +build !linux !amd64
++// +build !linux
+ 
+ package lxc
+ 
+diff --git a/graphdriver/aufs/mount_linux.go b/graphdriver/aufs/mount_linux.go
+index 6082d9f..3c268a5 100644
+--- a/graphdriver/aufs/mount_linux.go
++++ b/graphdriver/aufs/mount_linux.go
+@@ -1,4 +1,4 @@
+-// +build amd64
++// +build linux
+ 
+ package aufs
+ 
+diff --git a/graphdriver/aufs/mount_unsupported.go b/graphdriver/aufs/mount_unsupported.go
+index 2735624..e291bef 100644
+--- a/graphdriver/aufs/mount_unsupported.go
++++ b/graphdriver/aufs/mount_unsupported.go
+@@ -1,4 +1,4 @@
+-// +build !linux !amd64
++// +build !linux
+ 
+ package aufs
+ 
+diff --git a/graphdriver/devmapper/attach_loopback.go b/graphdriver/devmapper/attach_loopback.go
+index 2333907..456b564 100644
+--- a/graphdriver/devmapper/attach_loopback.go
++++ b/graphdriver/devmapper/attach_loopback.go
+@@ -1,4 +1,4 @@
+-// +build linux,amd64
++// +build linux
+ 
+ package devmapper
+ 
+diff --git a/graphdriver/devmapper/deviceset.go b/graphdriver/devmapper/deviceset.go
+index 8432d92..6e3caf6 100644
+--- a/graphdriver/devmapper/deviceset.go
++++ b/graphdriver/devmapper/deviceset.go
+@@ -1,4 +1,4 @@
+-// +build linux,amd64
++// +build linux
+ 
+ package devmapper
+ 
+diff --git a/graphdriver/devmapper/devmapper.go b/graphdriver/devmapper/devmapper.go
+index 7f83a09..d3eba78 100644
+--- a/graphdriver/devmapper/devmapper.go
++++ b/graphdriver/devmapper/devmapper.go
+@@ -1,4 +1,4 @@
+-// +build linux,amd64
++// +build linux
+ 
+ package devmapper
+ 
+diff --git a/graphdriver/devmapper/devmapper_log.go b/graphdriver/devmapper/devmapper_log.go
+index 18dde7c..8d54ad4 100644
+--- a/graphdriver/devmapper/devmapper_log.go
++++ b/graphdriver/devmapper/devmapper_log.go
+@@ -1,4 +1,4 @@
+-// +build linux,amd64
++// +build linux
+ 
+ package devmapper
+ 
+diff --git a/graphdriver/devmapper/devmapper_test.go b/graphdriver/devmapper/devmapper_test.go
+index 3ffa163..a43e32e 100644
+--- a/graphdriver/devmapper/devmapper_test.go
++++ b/graphdriver/devmapper/devmapper_test.go
+@@ -1,4 +1,4 @@
+-// +build linux,amd64
++// +build linux
+ 
+ package devmapper
+ 
+diff --git a/graphdriver/devmapper/devmapper_wrapper.go b/graphdriver/devmapper/devmapper_wrapper.go
+index bf558af..7e6dd5e 100644
+--- a/graphdriver/devmapper/devmapper_wrapper.go
++++ b/graphdriver/devmapper/devmapper_wrapper.go
+@@ -1,4 +1,4 @@
+-// +build linux,amd64
++// +build linux
+ 
+ package devmapper
+ 
+diff --git a/graphdriver/devmapper/driver.go b/graphdriver/devmapper/driver.go
+index 664899c..dae712b 100644
+--- a/graphdriver/devmapper/driver.go
++++ b/graphdriver/devmapper/driver.go
+@@ -1,4 +1,4 @@
+-// +build linux,amd64
++// +build linux
+ 
+ package devmapper
+ 
+diff --git a/graphdriver/devmapper/driver_test.go b/graphdriver/devmapper/driver_test.go
+index 785845c..9a2e409 100644
+--- a/graphdriver/devmapper/driver_test.go
++++ b/graphdriver/devmapper/driver_test.go
+@@ -1,4 +1,4 @@
+-// +build linux,amd64
++// +build linux
+ 
+ package devmapper
+ 
+diff --git a/graphdriver/devmapper/ioctl.go b/graphdriver/devmapper/ioctl.go
+index 30bafff..f9bf34f 100644
+--- a/graphdriver/devmapper/ioctl.go
++++ b/graphdriver/devmapper/ioctl.go
+@@ -1,4 +1,4 @@
+-// +build linux,amd64
++// +build linux
+ 
+ package devmapper
+ 
+diff --git a/graphdriver/devmapper/mount.go b/graphdriver/devmapper/mount.go
+index 4f19109..d005048 100644
+--- a/graphdriver/devmapper/mount.go
++++ b/graphdriver/devmapper/mount.go
+@@ -1,4 +1,4 @@
+-// +build linux,amd64
++// +build linux
+ 
+ package devmapper
+ 
+diff --git a/graphdriver/devmapper/sys.go b/graphdriver/devmapper/sys.go
+index 5a9ab4d..540c468 100644
+--- a/graphdriver/devmapper/sys.go
++++ b/graphdriver/devmapper/sys.go
+@@ -1,4 +1,4 @@
+-// +build linux,amd64
++// +build linux
+ 
+ package devmapper
+ 
+diff --git a/hack/make/bootstrap b/hack/make/bootstrap
+new file mode 100644
+index 0000000..69125a8
+--- /dev/null
++++ b/hack/make/bootstrap
+@@ -0,0 +1,339 @@
++# This is sourced by ../make.sh with a directory pathname in $1.
++# $1 is an existing empty directory, and this script is expected to
++# create its output in that directory. The bash options errexit and pipefail
++# are set on entry to this script (and they should be set on return, too).
++# The current directory is the root of the docker source tree.
++
++# This bundle builds docker without relying on any pre-existing docker
++# binary, any running docker daemon, or any pre-existing docker image.
++
++# The absolute path to the output bundle directory.
++case "$1" in
++/*) DEST="$1";;
++*)  DEST="$(pwd)/$1"
++esac
++
++# The absolute path to the base image tar file.
++bootstrap_baseimage_tar="${DEST}/baseimage.tar.xz"
++
++# The absolute path to the final (i.e. stage2) docker binary.
++bootstrap_built_binary="${DEST}/docker"
++
++# The command to build the docker build container.
++bootstrap_docker_build=''
++
++# The command prefix to run a command inside the docker build container.
++bootstrap_docker_run=''
++
++# The original contents of PATH.
++bootstrap_origPATH="${PATH:-}"
++
++# The original contents of DOCKER_HOST.
++bootstrap_origDOCKER_HOST="${DOCKER_HOST:-}"
++
++# A path to the pidfile for the temporary docker daemon, if any.
++bootstrap_tempdaemonpidfile=''
++
++# A command of the form "trap -- 'some command' EXIT" which will restore
++# the original value of the EXIT shell trap when eval'd. If there was no
++# EXIT trap set, this is the empty string.
++bootstrap_origEXIT="$(trap -p EXIT)"
++
++# bootstrap_shellquote foo => 'foo'
++# bootstrap_shellquote foo'bar => 'foo'\''bar'
++bootstrap_shellquote() {
++  local input="$1"
++  local output=""
++  local backslash='\'
++  local apostrophe="'"
++  if [[ -z "${input}" ]]; then
++    # Empty string => pair of apostrophes
++    printf "''"''
++    return 0
++  fi
++  while [[ -n "${input}" ]]; do
++    case "${input}" in
++    "'"*)
++      # Escape the apostrophe.
++      output="${output}${backslash}${apostrophe}"
++      input="${input#${apostrophe}}"
++      ;;
++    *"'"*)
++      # Quote everything before the first apostrophe, and then escape
++      # the apostrophe.
++      output="${output}${apostrophe}${input%%${apostrophe}*}${apostrophe}${backslash}${apostrophe}"
++      input="${input#*${apostrophe}}"
++      ;;
++    *[!+,./0-9:=@A-Z_a-z-]*)
++      # There are no apostrophes, but at least one character needs quoting.
++      # So quote the entire word.
++      output="${output}${apostrophe}${input}${apostrophe}"
++      input=""
++      ;;
++    *)
++      # Nothing needs quoting. Output everything literally.
++      output="${output}${input}"
++      input=""
++    esac
++  done
++  printf '%s' "${output}"
++}
++
++# bootstrap_echoexec CMD ARGS...
++# Writes CMD ARGS... to standard error, then runs them. Doesn't use exec.
++bootstrap_echoexec() {
++  local cmd="$1"
++  shift
++  printf 1>&2 '%s' "${cmd}"
++  local arg
++  for arg; do
++    printf 1>&2 ' '
++    bootstrap_shellquote "${arg}"
++  done
++  printf 1>&2 '\n'
++  "${cmd}" "$@"
++}
++
++# Translate a pathname under DEST to a pathname valid in the docker container.
++# e.g. bootstrap_containerize_bundle_path "$DEST/foo"
++# => "/go/src/github.com/dotcloud/docker/bundles/$VERSION/bootstrap/foo"
++bootstrap_containerize_bundle_path() {
++  # Use the fact that the bundles directory is bind-mounted on the
++  # "docker run" command line. Snatch it from the -v flag.
++  local vflag="${bootstrap_docker_run#* -v }"
++  vflag="${vflag%% *}"
++  local hostdir="${vflag%%:*}"
++  local mountpoint="${vflag#*:}"
++  local relativepath="${1#${hostdir}/}"
++  if [[ "$1" == "${relativepath}" ]]; then
++    printf 1>&2 'Internal error: %s does not begin with %s as expected.\n' \
++      "$1" "${hostdir}"
++    exit 1
++  fi
++  printf '%s/%s' "${mountpoint}" "${relativepath}"
++}
++
++# Create the base image in ${bootstrap_baseimage_tar}.
++bootstrap_baseimage() {
++  local arch="$(dpkg-architecture -qDEB_HOST_ARCH)"
++  bootstrap_echoexec bash ./contrib/mkimage-debootstrap.sh -a "${arch}" \
++    -i iproute,iputils-ping,ubuntu-minimal \
++    -t "${bootstrap_baseimage_tar}" saucy
++}
++
++# bootstrap_find_docker_commands divines the docker build/docker run commands
++# to use when building docker.
++bootstrap_find_docker_commands() {
++  # TODO: fetch these from ../../Makefile.
++  local git_branch="$(git rev-parse --abbrev-ref HEAD)"
++  local docker_image="docker:${git_branch}"
++  bootstrap_docker_build="docker build -rm -t ${docker_image} ."
++  bootstrap_docker_run="docker run -rm -i -t -privileged -e TESTFLAGS -v $(pwd)/bundles:/go/src/github.com/dotcloud/docker/bundles ${docker_image}"
++  printf '"docker build" ==> %s\n' "${bootstrap_docker_build}"
++  printf '"docker run" ==> %s\n' "${bootstrap_docker_run}"
++}
++
++# bootstrap_build_stage0 creates the stage0 binary, by:
++# 1. Placing the bootstrap-docker.sh script where it will be found by a
++#    regular PATH search for "docker"; and
++# 2. Setting environment variables so that bootstrap-docker.sh knows where
++#    to find the base image and where to put its container tree.
++bootstrap_build_stage0() {
++  mkdir "${DEST}/stage0"
++  mkdir "${DEST}/stage0/bin"
++  bootstrap_echoexec \
++    cp ./contrib/bootstrap-docker.sh "${DEST}/stage0/bin/docker"
++  bootstrap_echoexec \
++    chmod 755 "${DEST}/stage0/bin/docker"
++  PATH="${DEST}/stage0/bin:${PATH}"
++  BOOTSTRAP_DOCKER_DIR="${DEST}/stage0"
++  export PATH BOOTSTRAP_DOCKER_DIR
++  bootstrap_echoexec \
++    ln -s "${bootstrap_baseimage_tar}" "${BOOTSTRAP_DOCKER_DIR}/baseimage.tar.xz"
++}
++
++# bootstrap_make_binary OUTPUTPATH runs the "docker build" and "docker run"
++# commands which build docker inside a container. The built binary is written
++# to OUTPUTPATH (which must be a nonexistent file under $DEST).
++bootstrap_make_binary() {
++  local outputpath="$1"
++  bootstrap_echoexec eval "${bootstrap_docker_build}"
++  local ldflags="$LDFLAGS $LDFLAGS_STATIC"
++  local binarypath="$(bootstrap_containerize_bundle_path "${outputpath}")"
++  bootstrap_echoexec eval "${bootstrap_docker_run} go build -o ${binarypath} -ldflags \"\${ldflags}\" $BUILDFLAGS ./docker"
++}
++
++# bootstrap_build_stage1 creates the stage1 binary, by:
++# 1. Running "docker build" in the stage0 environment, which will extract the
++#    base image into a new container chroot tree, and customize the tree
++#    according to Dockerfile;
++# 2. Running "docker run" go build in the stage0 environment,
++#    which will build the stage1 binary; and
++# 3. Placing the new binary where it will be found by a
++#    regular PATH search for "docker".
++bootstrap_build_stage1() {
++  mkdir "${DEST}/stage1"
++  mkdir "${DEST}/stage1/bin"
++  bootstrap_make_binary "${DEST}/stage1/bin/docker"
++  PATH="${DEST}/stage1/bin:${PATH}"
++  export PATH
++  # We're done with stage0 now that we have stage1.
++  rm -fr "${DEST}/stage0"
++  unset BOOTSTRAP_DOCKER_DIR
++}
++
++# bootstrap_cleanup cleans up any essential state modified by this script.
++# It leaves the EXIT trap alone, because it might be called from that trap.
++bootstrap_cleanup() {
++  PATH="${bootstrap_origPATH}"
++  if [[ -n "${bootstrap_origDOCKER_HOST}" ]]; then
++    DOCKER_HOST="${bootstrap_origDOCKER_HOST}"
++  fi
++  if [[ -n "${bootstrap_tempdaemonpidfile}" ]]; then
++    if [[ -f "${bootstrap_tempdaemonpidfile}" ]]; then
++      local pid="$(cat "${bootstrap_tempdaemonpidfile}")"
++      if ps -o comm -p "${pid}" | grep -q '^[[:space:]]*docker[[:space:]]*$'
++      then
++        # OK, the pidfile contains the ID for a process running "docker".
++        kill "${pid}"
++        # Wait for the process to quit.
++        local patience=30
++        while ps -o comm -p "${pid}" | grep -q '^[[:space:]]*docker[[:space:]]*$'; do
++          let patience--
++          if [[ ${patience} -le 0 ]]; then
++            printf 1>&2 'Error: timed out waiting for docker daemon to quit.\n'
++            exit 1
++          fi
++          sleep 1
++        done
++      fi
++    fi
++    bootstrap_tempdaemonpidfile=''
++  fi
++  # If we had to place a daemon socket in /tmp, find it and remove its
++  # directory.
++  find "${DEST}/stage2" -mindepth 2 -maxdepth 2 \
++    '(' -type d ! -name 'daemon.*' -prune \
++    -o -type l -lname '/tmp/daemon.*/sock' -printf '%l\n' \
++    ')' | while read sock; do
++    rm "${sock}" </dev/null
++    rmdir "$(dirname "${sock}")" </dev/null
++  done
++  rm -fr "${DEST}/stage0" "${DEST}/stage1" "${DEST}/stage2" 2>/dev/null || true
++}
++
++# Read ./Dockerfile and extract the image name used in the FROM directive.
++bootstrap_get_base_image_name() {
++  local baseimagename_awk='NF >= 2 && toupper($1) == "FROM" { print $2 }'
++  local baseimagename="$(awk "${baseimagename_awk}" ./Dockerfile)"
++  if [[ -z "${baseimagename}" ]]; then
++    printf 1>&2 'Error: failed to extract FROM image name from ./Dockerfile\n'
++    exit 1
++  fi
++  printf '%s' "${baseimagename}"
++}
++
++# bootstrap_build_stage2 creates the stage2 binary, by:
++# 1. Starting a temporary docker daemon;
++# 2. Importing the base image to the docker daemon;
++# 3. Running "docker build" to prepare the build environment; and
++# 4. Running "docker run" go build in the newly-built docker container,
++#    which will build the stage2 binary.
++bootstrap_build_stage2() {
++  mkdir "${DEST}/stage2"
++  mkdir "${DEST}/stage2/bin"
++
++  # Start the temporary docker daemon. Use a varying directory to minimize
++  # the risk that a rogue old temporary daemon will interfere with the
++  # current one, if it should somehow survive cleanup.
++  local daemondir="$(mktemp -d "${DEST}/stage2/daemon.$(date +%s).XXXXXXXXXX")"
++  bootstrap_tempdaemonpidfile="${daemondir}/pid"
++  local daemonsock="${daemondir}/sock"
++  # If the socket name is too long to fit in sockaddr_un.sun_path, then
++  # use /tmp instead.
++  if [[ ${#daemonsock} -gt 108 ]]; then
++    daemonsock="$(mktemp -d "/tmp/daemon.$(date +%s).XXXXXXXXXX")/sock"
++    bootstrap_echoexec ln -s "${daemonsock}" "${daemondir}/sock"
++  fi
++  chmod 0700 "$(dirname "${daemonsock}")"
++  DOCKER_HOST="unix://${daemonsock}"
++  export DOCKER_HOST
++  local daemonruntime=""
++  echo 1>&2 ${DEST}/stage1/bin/docker -H "${DOCKER_HOST}" \
++    -p "${bootstrap_tempdaemonpidfile}" \
++    -g "${daemondir}/runtime" \
++    -r=false -d \
++    ${DNS:+-dns} ${DNS:+"${DNS}"} \
++    '<' /dev/null '>' "${daemondir}/daemon.log" '2>&1' '&'
++  ${DEST}/stage1/bin/docker -H "${DOCKER_HOST}" \
++    -p "${bootstrap_tempdaemonpidfile}" \
++    -g "${daemondir}/runtime" \
++    -r=false -d \
++    ${DNS:+-dns} ${DNS:+"${DNS}"} \
++    < /dev/null > "${daemondir}/daemon.log" 2>&1 &
++
++  # Wait for the docker binary to be up and serving.
++  local patience=30
++  while [[ ! -e "${bootstrap_tempdaemonpidfile}" || ! -e "${daemonsock}" ]]; do
++    let patience--
++    if [[ ${patience} -le 0 ]]; then
++      printf 1>&2 'Error: timed out waiting for stage1 daemon to start.\n'
++      exit 1
++    fi
++    sleep 1
++  done
++
++  # Load the base image.
++  local baseimagename="$(bootstrap_get_base_image_name)"
++  bootstrap_echoexec docker import - "${baseimagename}" \
++    < "${bootstrap_baseimage_tar}"
++
++  # A quick check to save some users some pain.
++  if ! bootstrap_echoexec docker run -rm -i "${baseimagename}" getent hosts archive.ubuntu.com; then
++    printf 1>&2 'Error: docker containers cannot resolve archive.ubuntu.com\n'
++    printf 1>&2 'Hint: try again with env DNS=8.8.8.8 make bootstrap\n'
++    exit 1
++  fi
++
++  # Build the stage2 binary.
++  bootstrap_make_binary "${DEST}/stage2/bin/docker"
++
++  # Move it to where it belongs.
++  bootstrap_echoexec mv "${DEST}/stage2/bin/docker" "${bootstrap_built_binary}"
++}
++
++bootstrap_advise_to_install() {
++  local dnsflag=''
++  if [[ -n "${DNS}" ]]; then
++    dnsflag=" -dns ${DNS}"
++  fi
++  printf '\nTo complete bootstrapping, you must install the binary, start the\n'
++  printf 'daemon, and install the base image. Run the following as root:\n\n'
++  printf '    install -T %s /usr/local/bin/docker\n' "${bootstrap_built_binary}"
++  printf '    nohup /usr/local/bin/docker -d%s &\n' "${dnsflag}"
++  printf '    /usr/local/bin/docker import - %s < %s\n' \
++    "$(bootstrap_get_base_image_name)" "${bootstrap_baseimage_tar}"
++  printf '\nThen, you will be able to use "make" for a normal build.\n'
++  # TODO: Tell the user how to build the ubuntu bundle.
++}
++
++bootstrap_main() {
++  trap bootstrap_cleanup EXIT
++
++  bootstrap_baseimage
++  bootstrap_find_docker_commands
++  bootstrap_build_stage0
++  bootstrap_build_stage1
++  bootstrap_build_stage2
++  bootstrap_advise_to_install
++
++  # Call cleanup without waiting for shell exit, and restore the exit trap.
++  if [[ -n "${bootstrap_origEXIT}" ]]; then
++    eval "${bootstrap_origEXIT}"
++  else
++    trap '' EXIT
++  fi
++  bootstrap_cleanup
++}
++
++bootstrap_main
+diff --git a/pkg/graphdb/conn_linux.go b/pkg/graphdb/conn_linux.go
+index 7a1ab8c..da0b9cf 100644
+--- a/pkg/graphdb/conn_linux.go
++++ b/pkg/graphdb/conn_linux.go
+@@ -1,4 +1,4 @@
+-// +build amd64
++// +build linux darwin
+ 
+ package graphdb
+ 
+diff --git a/pkg/graphdb/conn_unsupported.go b/pkg/graphdb/conn_unsupported.go
+index c2d6025..c8c3a34 100644
+--- a/pkg/graphdb/conn_unsupported.go
++++ b/pkg/graphdb/conn_unsupported.go
+@@ -1,4 +1,4 @@
+-// +build !linux !amd64
++// +build !linux,!darwin
+ 
+ package graphdb
+ 
+diff --git a/pkg/mount/flags_linux.go b/pkg/mount/flags_linux.go
+index b7124b1..aa3f2fb 100644
+--- a/pkg/mount/flags_linux.go
++++ b/pkg/mount/flags_linux.go
+@@ -1,4 +1,4 @@
+-// +build amd64
++// +build linux
+ 
+ package mount
+ 
+diff --git a/pkg/mount/flags_unsupported.go b/pkg/mount/flags_unsupported.go
+index c894efe..b9731a5 100644
+--- a/pkg/mount/flags_unsupported.go
++++ b/pkg/mount/flags_unsupported.go
+@@ -1,4 +1,4 @@
+-// +build !linux !amd64
++// +build !linux
+ 
+ package mount
+ 
+diff --git a/pkg/mount/mounter_linux.go b/pkg/mount/mounter_linux.go
+index 70b7798..03b3936 100644
+--- a/pkg/mount/mounter_linux.go
++++ b/pkg/mount/mounter_linux.go
+@@ -1,4 +1,4 @@
+-// +build amd64
++// +build linux
+ 
+ package mount
+ 
+diff --git a/pkg/mount/mounter_unsupported.go b/pkg/mount/mounter_unsupported.go
+index ee27b35..de40fb5 100644
+--- a/pkg/mount/mounter_unsupported.go
++++ b/pkg/mount/mounter_unsupported.go
+@@ -1,4 +1,4 @@
+-// +build !linux !amd64
++// +build !linux
+ 
+ package mount
+ 
+diff --git a/pkg/netlink/netlink_linux.go b/pkg/netlink/netlink_linux.go
+index 0ea5b4d..493b00d 100644
+--- a/pkg/netlink/netlink_linux.go
++++ b/pkg/netlink/netlink_linux.go
+@@ -1,4 +1,4 @@
+-// +build amd64
++// +build linux
+ 
+ package netlink
+ 
+diff --git a/pkg/netlink/netlink_unsupported.go b/pkg/netlink/netlink_unsupported.go
+index cd796b3..69784f1 100644
+--- a/pkg/netlink/netlink_unsupported.go
++++ b/pkg/netlink/netlink_unsupported.go
+@@ -1,4 +1,4 @@
+-// +build !linux !amd64
++// +build !linux
+ 
+ package netlink
+ 
+diff --git a/utils/uname_linux.go b/utils/uname_linux.go
+index 2f4afb4..1fdfc19 100644
+--- a/utils/uname_linux.go
++++ b/utils/uname_linux.go
+@@ -1,4 +1,4 @@
+-// +build amd64
++// +build linux
+ 
+ package utils
+ 
+diff --git a/utils/uname_unsupported.go b/utils/uname_unsupported.go
+index 57b82ec..a6efdb7 100644
+--- a/utils/uname_unsupported.go
++++ b/utils/uname_unsupported.go
+@@ -1,4 +1,4 @@
+-// +build !linux !amd64
++// +build !linux
+ 
+ package utils
+ 

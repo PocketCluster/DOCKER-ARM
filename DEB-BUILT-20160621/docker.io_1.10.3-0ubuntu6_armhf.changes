@@ -1,0 +1,41 @@
+Format: 1.8
+Date: Wed, 20 Apr 2016 14:19:16 -0700
+Source: docker.io
+Binary: docker.io vim-syntax-docker golang-github-docker-docker-dev golang-docker-dev
+Architecture: source armhf all
+Version: 1.10.3-0ubuntu6
+Distribution: xenial
+Urgency: medium
+Maintainer: Ubuntu Developers <ubuntu-devel-discuss@lists.ubuntu.com>
+Changed-By: Tianon Gravi <tianon@debian.org>
+Description:
+ docker.io  - Linux container runtime
+ golang-docker-dev - Transitional package for golang-github-docker-docker-dev
+ golang-github-docker-docker-dev - Externally reusable Go packages included with Docker
+ vim-syntax-docker - Docker container engine - Vim highlighting syntax files
+Changes:
+ docker.io (1.10.3-0ubuntu6) xenial; urgency=medium
+ .
+   * Clean up some DEP3 patch metadata (especially "Origin" and "Forwarded")
+Checksums-Sha1:
+ 3a08b23d721cb1fcc3d50140b6a791f41556f844 1691 docker.io_1.10.3-0ubuntu6.dsc
+ 9dd2418bdf39a6f64fbe4834dd0278f035eebf67 52072 docker.io_1.10.3-0ubuntu6.debian.tar.xz
+ b412fac3d6ed9f8a3a1bc966a9f89f278a5ba4d6 7882732 docker.io_1.10.3-0ubuntu6_armhf.deb
+ 5f95784100e59c3efba0e78a851b872a9eae7771 8130 golang-docker-dev_1.10.3-0ubuntu6_all.deb
+ 5ff5b2e0a5552d230142d7ea2de9df01b90129dc 235916 golang-github-docker-docker-dev_1.10.3-0ubuntu6_all.deb
+ 288bcad020f993364328eca38a0dc2e0d0446708 9340 vim-syntax-docker_1.10.3-0ubuntu6_all.deb
+Checksums-Sha256:
+ c484365b80ca588335688129588a7e7519b97ff5acd0525ce9540264b63e8dd7 1691 docker.io_1.10.3-0ubuntu6.dsc
+ 2e9091159ba4debdda9228364f121ae9af6c0b6fb11c0ffa274924f452a879cb 52072 docker.io_1.10.3-0ubuntu6.debian.tar.xz
+ c49f00451cfb821300432f9a16f0c7f0cab7e7cb9c80ce1530353aed7a27a15f 7882732 docker.io_1.10.3-0ubuntu6_armhf.deb
+ 2aca40dad03f7678a6019e5da4b39702275484e6b6a6ff532f26e3c6ee720475 8130 golang-docker-dev_1.10.3-0ubuntu6_all.deb
+ cc5a3aa46f245ae8d2b1a528083c273c5f6f570505625242d55b1455d23970a1 235916 golang-github-docker-docker-dev_1.10.3-0ubuntu6_all.deb
+ 1ee222318039bd474b0aa65af9215996f25053454dea1dd7cede2f15dd37ed2f 9340 vim-syntax-docker_1.10.3-0ubuntu6_all.deb
+Files:
+ 9d7252f7ab4908f11684e9816851c72f 1691 admin optional docker.io_1.10.3-0ubuntu6.dsc
+ 2fb7330c8209903b18aaa290db1c717c 52072 admin optional docker.io_1.10.3-0ubuntu6.debian.tar.xz
+ 5241619c598bde8bea5d55b88b5ecc54 7882732 admin optional docker.io_1.10.3-0ubuntu6_armhf.deb
+ c3c3844cb7eddc8e8bd361d6da4555d0 8130 oldlibs optional golang-docker-dev_1.10.3-0ubuntu6_all.deb
+ 16181c91be7ce950c531f3d5a77bb6b1 235916 admin optional golang-github-docker-docker-dev_1.10.3-0ubuntu6_all.deb
+ 960c3437b4b69af90178a573a380214b 9340 admin optional vim-syntax-docker_1.10.3-0ubuntu6_all.deb
+Original-Maintainer: Paul Tagliamonte <paultag@debian.org>

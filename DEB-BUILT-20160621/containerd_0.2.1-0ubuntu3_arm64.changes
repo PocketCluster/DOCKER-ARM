@@ -1,0 +1,33 @@
+Format: 1.8
+Date: Wed, 15 Jun 2016 14:47:15 -0700
+Source: containerd
+Binary: containerd golang-github-docker-containerd-dev
+Architecture: source arm64 all
+Version: 0.2.1-0ubuntu3
+Distribution: yakkety
+Urgency: medium
+Maintainer: Ubuntu Developers <ubuntu-devel-discuss@lists.ubuntu.com>
+Changed-By: Tianon Gravi <tianon@debian.org>
+Description:
+ containerd - daemon to control runC
+ golang-github-docker-containerd-dev - runC develpoment files
+Changes:
+ containerd (0.2.1-0ubuntu3) yakkety; urgency=medium
+ .
+   * Fix "-dev" package Depends, and use vendoring more directly
+Checksums-Sha1:
+ 94d0e644e96906ba0a589a4de85cbc6a85373dc6 1379 containerd_0.2.1-0ubuntu3.dsc
+ 9c75a67f0e9bd018668a49d8a45138a83f0b3073 9812 containerd_0.2.1-0ubuntu3.debian.tar.xz
+ aa8ec9eef6f9329f7322e1111e265bce0e9c3731 3411704 containerd_0.2.1-0ubuntu3_arm64.deb
+ f5bda939941d786fee0e3b7037d8e757e9f5c4f0 480488 golang-github-docker-containerd-dev_0.2.1-0ubuntu3_all.deb
+Checksums-Sha256:
+ e84ac34f83b04a81afbb0283f9bf27dda02d39e8e24915593e87daf1e749b6c7 1379 containerd_0.2.1-0ubuntu3.dsc
+ 74729f2f2fcf7de10d397d240f5c14767060ff8af72503f05dc5a544af51246b 9812 containerd_0.2.1-0ubuntu3.debian.tar.xz
+ 30cceb808084e6bd2f33af4dac34d33dad7f2a846ffc1396b12fc86be9e1df75 3411704 containerd_0.2.1-0ubuntu3_arm64.deb
+ 13cb93ac22250b66ac417e0d2f86182ca71c093c92f9508cdfe25e1bfe5e2725 480488 golang-github-docker-containerd-dev_0.2.1-0ubuntu3_all.deb
+Files:
+ e3722eec3912c58e4f5a033b292f5b88 1379 admin optional containerd_0.2.1-0ubuntu3.dsc
+ 4a62023011e308444c22ddd33c796ddd 9812 admin optional containerd_0.2.1-0ubuntu3.debian.tar.xz
+ 383345406ecd12fbaad79860e84e55e7 3411704 admin optional containerd_0.2.1-0ubuntu3_arm64.deb
+ 7e34ab9a45f9f7c3aa834de1b8181416 480488 admin optional golang-github-docker-containerd-dev_0.2.1-0ubuntu3_all.deb
+Original-Maintainer: Debian Go Packaging Team <pkg-go-maintainers@lists.alioth.debian.org>
