@@ -1,0 +1,173 @@
+How to build docker stage1 (and stage2)
+
+Building docker normally requires docker. This situation usually occurs with
+compilers, which use a standard solution. A similar solution can be used to
+bootstrap docker. Here's how I did it, in case `make bootstrap` doesn't do
+it for you and you need explanation of what's going on.
+
+There are 3 "docker" executables:
+
++ stage0: this is a Bash script (bootstrap-docker.sh). It understands just
+  enough to start a (non-docker) container using the lxc tools.
++ stage1: this is a docker binary built inside a stage0 non-docker container.
++ stage2: this is a docker binary built inside a stage1 docker container.
+
+First you build stage0. Then you use stage0 to build stage1. Finally, you use
+stage1 to build stage2. The stage2 binary is the final product for all intents
+and purposes.
+
+1. Prepare the host system.
+I ran this on an i386 GNU/Linux Ubuntu 12.04 ("precise") machine. I
+had to install a newer kernel (linux-image-generic-lts-raring),
+edit kernel flags (GRUB_CMDLINE_LINUX="cgroup_enable=memory swapaccount=1"),
+and install the following packages:
+
+aufs-tools automake build-essential debhelper debootstrap fakeroot git
+libalgorithm-diff-xs-perl libalgorithm-merge-perl libcman-dev libcorosync-dev
+libdevmapper-dev libdlm-dev libmail-sendmail-perl libreadline-gplv2-dev
+libsqlite3-dev lxc manpages-dev mercurial openais-dev pkg-config
+
+2. Stage 0
+Building stage0 involves making a directory and copying bootstrap-docker.sh
+into it as the name "docker", then adding the new directory to the PATH.
+
+3. Base image
+The contrib/mkimage-debootstrap.sh script, run with -t, is used to build a
+tar file that can be used as the base image. The base image is the one
+referred to by the line `FROM ubuntu:13.10` in Dockerfile. The
+stage0 script uses "baseimage.tar.xz" instead of whatever's named in FROM.
+
+4. Stage 1
+With the PATH extended such that "docker" refers to the stage0 script, run what
+`make binary` does. That is, run `docker build` to build the docker build
+image, and then run `docker run` with its cluster of flags to start building
+the stage1 binary inside the container. Note that the container is an LXC
+container, but not a Docker container, so the binary built from this stage is
+probably OK but it could have unwelcome quirks by virtue of being built outside
+of the officially supported build environment. Therefore there is another
+stage.
+
+5. Stage 2
+The stage1 binary is run as a daemon, and the base image is imported into it
+with the expected name (ubuntu:13.10). The PATH is adjusted so
+that "docker" refers to the stage1 binary. Then, a proper `docker build`
+and `docker run` are performed. The container in this stage is a true Docker
+container. The resulting binary is therefore the final build result.
+
+If you get errors about resolving hostnames such as archive.ubuntu.com, it's a
+sure sign that you've run into a docker DNS bug that was prematurely closed
+(https://github.com/dotcloud/docker/issues/541). The workaround is to find an
+IPv4 address for a recursive nameserver NOT on localhost, and to pass it into
+the docker daemon on startup. Set the environment variable DNS to the IP
+address of the name server to use, e.g. `env DNS=8.8.8.8 make bootstrap`.
+8.8.8.8 is one of Google's Public DNS addresses, so it's worth trying if you
+don't know a nearby nameserver address.
+
+You may notice that the docker Dockerfile is completely processed twice (once
+to build stage1 and again to build stage2). Sadly, it's not practical to cache
+the first build and reuse it, because it would require some unwarranted
+chumminess with docker's image cache. Don't worry, the build should take less
+than 20 minutes.
+
+6. Run a proper build
+Start the stage2 binary with -d (and -dns 8.8.8.8 if necessary), then import
+the baseimage.tar.xz file with the name Dockerfile expects
+(currently ubuntu:13.10). Then make sure that "docker images" lists
+the image with that name, and you should be able to "sudo make binary".
+
+7. Build debs
+Run `make debs` and it should build .deb files you can install on Debian-type
+systems. Be sure to stop any docker daemon(s) you already started before
+installing the debs, as installation will automatically start the daemon.
+
+8. Build an image for the integration tests.
+WARNING: This step is long, hateful, and optional. Skip it unless you're
+planning to make changes to docker on i386.  In the source file
+integration/runtime_test.go you will find references to an image called
+"docker-test-image", along with a hardcoded image ID.  If you want to get the
+integration tests to pass, you must build an i386 version of this image.
+
+You could just "sudo docker pull aecolley/docker-test-image32" (and edit its
+details into runtime_test.go). But if you want or need to know how to make one,
+read on.
+
+The script contrib/mkimage-unittest.sh builds a suitable image on amd64, but
+it's no good for i386 images. You have to tweak it substantially.
+
+The image is a minimal Debian root filesystem with busybox and socat binaries,
+along with their support shared libraries. The major wrinkle here is that the
+tests depend on behaviour of busybox 1.20 that you won't find in busybox 1.18,
+and busybox 1.18 is what's in the Ubuntu 12.04 repository.  So, if you're
+building for 12.04 (as I was), then you'll have to compile the Ubuntu 12.10
+busybox package.  The build failed for me until I edited debian/rules to remove
+the references to the static build target and reran dpkg-buildpackage -uc -b.
+
+Once you have the .deb files for busybox and socat (hint: apt-get download
+socat), you can unpack them (using the ar command) and find the binaries
+for busybox and socat.
+
+Grab the official test image (docker pull docker-test-image). Then extract
+it to a new directory tree:
+
+sudo mkdir /tmp/testfs
+sudo docker export $(sudo docker run -d docker-test-image true) | sudo tar -C /tmp/testfs -xpf -
+
+Now overwrite /tmp/testfs/bin/busybox with your own (be aware that it's
+hardlinked to init, so don't just cp it). Similarly, replace
+/tmp/testfs/bin/socat. Now for the libraries. Delete the contents of
+/tmp/testfs/lib and copy in the following files from (a subdir of) /lib:
+
+ld-linux.so.2
+libtinfo.so.5.9
+libssl.so.1.0.0
+libreadline.so.5.2
+libz.so.1
+libpthread-2.15.so
+libpthread.so.0
+libwrap.so.0.7.6
+libresolv-2.15.so
+libnss_dns.so.2
+libnss_nis-2.15.so
+libnss_hesiod-2.15.so
+libnss_files-2.15.so
+libc.so.6
+libwrap.so.0
+libnss_dns-2.15.so
+libreadline.so.5
+libdl.so.2
+libutil-2.15.so
+libnss_files.so.2
+libnss_nisplus-2.15.so
+libutil.so.1
+libnss_nisplus.so.2
+libz.so.1.2.3.4
+libnsl.so.1
+libcrypto.so.1.0.0
+libresolv.so.2
+libnsl-2.15.so
+libc-2.15.so
+libnss_hesiod.so.2
+libnss_nis.so.2
+libnss_compat-2.15.so
+libtinfo.so.5
+libnss_compat.so.2
+ld-2.15.so
+libdl-2.15.so
+
+Be aware that about half of these are symlinks, so again a simple cp is
+the wrong thing to use. This list was compiled by using ldd on the libraries
+required by busybox and socat, and copying in everything that they needed,
+as well as anything that was included in the original docker-test-image.
+
+Once you've customized /tmp/testfs, you can then pack it up into an image:
+
+sudo tar -C /tmp/testfs -cf - . | sudo docker import - docker-test-image32
+
+Then you'll have an image named "docker-test-image32". Use docker inspect
+to find its ID. Then edit integration/runtime_test.go to update the values
+for unitTestImageName, unitTestImageID, and unitTestImageIDShort.
+
+Now you can run "sudo make test" in the dockersource directory and expect the
+tests to pass! Unless you have less than 1GB of memory; then one of the tests
+will fail when its auto-scaled-to-ramsize tmpfs filesystem runs out of space.
+But other than that, success!
