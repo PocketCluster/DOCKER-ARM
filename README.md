@@ -42,7 +42,7 @@ You must read [`PACKAGER.md`](DOCUMENT/PACKAGERS.md) and then have prepped all t
   ```
   * Make sure the original archive is placed at the parent directory and don't delete original archives!
   * Debian package builder will overwrite  `docker.io_1.10.3-0ubuntu6.debian.tar.xz`! Watchout for backup
-3. Make sure you installed all the required packages. **DO NOT USE `golang-go`** as we've substitude with `gccgo6`.
+3. Make sure you installed all the required packages. **DO NOT USE `golang-go`** as we've substitude with `gccgo6` and our own compiled golang version (`v1.7.5` as of _2017-01-30_)
   
   ```sh  
   # Hold off installing golang-go if you have your own golang binary, or gccgo
